@@ -1,0 +1,27 @@
+{
+  "name": "youtube-watch-tracker",
+  "version": "1.0.0",
+  "description": "Web service to track YouTube watch time over the last 30 days",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "googleapis": "^129.0.0",
+    "passport": "^0.7.0",
+    "passport-google-oauth20": "^2.0.0",
+    "express-session": "^1.17.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "chart.js": "^4.4.0",
+    "chartjs-adapter-date-fns": "^3.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "keywords": ["youtube", "analytics", "tracking", "oauth"],
+  "author": "",
+  "license": "MIT"
+}
