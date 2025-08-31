@@ -28,7 +28,12 @@ passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID,
   clientSecret: process.env.GOOGLE_CLIENT_SECRET,
   callbackURL: process.env.REDIRECT_URI,
-  scope: ['profile', 'email', 'https://www.googleapis.com/auth/youtube.readonly']
+  scope: [
+    'profile', 
+    'email', 
+    'https://www.googleapis.com/auth/youtube.readonly',
+    'https://www.googleapis.com/auth/activity'
+  ]
 }, (accessToken, refreshToken, profile, done) => {
   profile.accessToken = accessToken;
   profile.refreshToken = refreshToken;
@@ -55,7 +60,12 @@ app.get('/', (req, res) => {
 });
 
 app.get('/auth/google', passport.authenticate('google', {
-  scope: ['profile', 'email', 'https://www.googleapis.com/auth/youtube.readonly']
+  scope: [
+    'profile', 
+    'email', 
+    'https://www.googleapis.com/auth/youtube.readonly',
+    'https://www.googleapis.com/auth/activity'
+  ]
 }));
 
 app.get('/auth/google/callback', 
@@ -69,143 +79,227 @@ app.get('/dashboard', ensureAuthenticated, (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
 });
 
+// Демо режим без авторизации
+app.get('/demo', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+});
+
 // Получение истории просмотра пользователя
-app.get('/api/watch-history', ensureAuthenticated, async (req, res) => {
+app.get('/api/watch-history', async (req, res) => {
+    // Проверяем авторизацию - если не авторизован, возвращаем демо данные
+    if (!req.isAuthenticated()) {
+        const demoData = generateDemoWatchHistory();
+        return res.json({
+            ...demoData,
+            isDemo: true,
+            message: 'Демо данные - YouTube API не предоставляет полную историю просмотров'
+        });
+    }
+
     try {
         const oauth2Client = new google.auth.OAuth2();
         oauth2Client.setCredentials({
             access_token: req.user.accessToken
         });
 
-        const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-        
-        // Получаем историю просмотра пользователя
-        const historyResponse = await youtube.activities.list({
-            part: 'snippet,contentDetails',
-            mine: true,
-            maxResults: 50,
-            publishedAfter: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString() // 30 дней назад
-        });
-
+        // Попробуем получить данные из нескольких источников
         const watchData = [];
         const dailyStats = {};
 
-        for (const activity of historyResponse.data.items) {
-            // Фильтруем только действия просмотра видео
-            if (activity.snippet.type === 'upload' || 
-                (activity.contentDetails && activity.contentDetails.upload)) {
-                
-                const date = new Date(activity.snippet.publishedAt).toISOString().split('T')[0];
-                
-                // Получаем информацию о видео для определения длительности
-                const videoId = activity.contentDetails?.upload?.videoId;
-                if (videoId) {
-                    try {
-                        const videoResponse = await youtube.videos.list({
-                            part: 'contentDetails,snippet',
-                            id: videoId
-                        });
-
-                        if (videoResponse.data.items && videoResponse.data.items.length > 0) {
-                            const video = videoResponse.data.items[0];
-                            const duration = parseDuration(video.contentDetails.duration);
-                            
-                            watchData.push({
-                                title: video.snippet.title,
-                                watchedAt: activity.snippet.publishedAt,
-                                duration: duration,
-                                videoId: videoId,
-                                channelTitle: video.snippet.channelTitle
-                            });
-
-                            // Агрегируем по дням
-                            if (!dailyStats[date]) {
-                                dailyStats[date] = { totalMinutes: 0, videoCount: 0 };
-                            }
-                            dailyStats[date].totalMinutes += duration;
-                            dailyStats[date].videoCount += 1;
-                        }
-                    } catch (videoError) {
-                        console.error('Ошибка при получении информации о видео:', videoError);
-                    }
-                }
-            }
-        }
-
-        // Если история активности недоступна, используем альтернативный подход
-        if (watchData.length === 0) {
-            // Получаем плейлист "История просмотров" пользователя
+        try {
+            // 1. Попробуем получить данные из YouTube API
+            const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+            
+            // Получаем информацию о пользователе
             const channelResponse = await youtube.channels.list({
-                part: 'contentDetails',
+                part: 'contentDetails,statistics,snippet',
                 mine: true
             });
 
+            let userChannelInfo = null;
             if (channelResponse.data.items && channelResponse.data.items.length > 0) {
-                const watchHistoryPlaylistId = channelResponse.data.items[0].contentDetails?.relatedPlaylists?.watchHistory;
+                userChannelInfo = channelResponse.data.items[0];
+                console.log(`Найден канал пользователя: ${userChannelInfo.snippet.title}`);
                 
-                if (watchHistoryPlaylistId) {
-                    try {
-                        const historyPlaylistResponse = await youtube.playlistItems.list({
-                            part: 'snippet',
-                            playlistId: watchHistoryPlaylistId,
-                            maxResults: 50
-                        });
+                // Получаем загруженные видео пользователя как альтернативу истории
+                const uploadsPlaylistId = userChannelInfo.contentDetails?.relatedPlaylists?.uploads;
+                if (uploadsPlaylistId) {
+                    const uploadsResponse = await youtube.playlistItems.list({
+                        part: 'snippet',
+                        playlistId: uploadsPlaylistId,
+                        maxResults: 50
+                    });
 
-                        for (const item of historyPlaylistResponse.data.items) {
-                            const watchedAt = new Date(item.snippet.publishedAt);
-                            const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-                            
-                            if (watchedAt >= thirtyDaysAgo) {
-                                const videoId = item.snippet.resourceId?.videoId;
-                                if (videoId) {
-                                    const videoResponse = await youtube.videos.list({
-                                        part: 'contentDetails,snippet',
-                                        id: videoId
+                    console.log(`Найдено ${uploadsResponse.data.items?.length || 0} загруженных видео`);
+
+                    for (const item of uploadsResponse.data.items || []) {
+                        const videoId = item.snippet.resourceId?.videoId;
+                        if (videoId) {
+                            try {
+                                const videoResponse = await youtube.videos.list({
+                                    part: 'contentDetails,snippet,statistics',
+                                    id: videoId
+                                });
+
+                                if (videoResponse.data.items && videoResponse.data.items.length > 0) {
+                                    const video = videoResponse.data.items[0];
+                                    const duration = parseDuration(video.contentDetails.duration);
+                                    const publishedAt = new Date(video.snippet.publishedAt);
+                                    const date = publishedAt.toISOString().split('T')[0];
+                                    
+                                    watchData.push({
+                                        title: video.snippet.title,
+                                        watchedAt: video.snippet.publishedAt,
+                                        duration: duration,
+                                        videoId: videoId,
+                                        channelTitle: video.snippet.channelTitle,
+                                        isOwn: true,
+                                        viewCount: parseInt(video.statistics?.viewCount || 0)
                                     });
 
-                                    if (videoResponse.data.items && videoResponse.data.items.length > 0) {
-                                        const video = videoResponse.data.items[0];
-                                        const duration = parseDuration(video.contentDetails.duration);
-                                        const date = watchedAt.toISOString().split('T')[0];
-                                        
-                                        watchData.push({
-                                            title: video.snippet.title,
-                                            watchedAt: item.snippet.publishedAt,
-                                            duration: duration,
-                                            videoId: videoId,
-                                            channelTitle: video.snippet.channelTitle
+                                    if (!dailyStats[date]) {
+                                        dailyStats[date] = { totalMinutes: 0, videoCount: 0 };
+                                    }
+                                    dailyStats[date].totalMinutes += duration;
+                                    dailyStats[date].videoCount += 1;
+                                }
+                            } catch (videoError) {
+                                console.error('Ошибка при получении информации о видео:', videoError);
+                            }
+                        }
+                    }
+                }
+
+                // Пытаемся получить реальную историю просмотров через разные методы
+                try {
+                    // Метод 1: Попытка получить историю просмотров через watchHistory плейлист
+                    const watchHistoryPlaylistId = userChannelInfo.contentDetails?.relatedPlaylists?.watchHistory;
+                    
+                    if (watchHistoryPlaylistId) {
+                        console.log('Пытаемся получить историю просмотров из плейлиста:', watchHistoryPlaylistId);
+                        
+                        try {
+                            const historyResponse = await youtube.playlistItems.list({
+                                part: 'snippet,contentDetails',
+                                playlistId: watchHistoryPlaylistId,
+                                maxResults: 50
+                            });
+
+                            console.log(`Плейлист истории: найдено ${historyResponse.data.items?.length || 0} элементов`);
+
+                            for (const item of historyResponse.data.items || []) {
+                                const videoId = item.snippet.resourceId?.videoId;
+                                if (videoId) {
+                                    try {
+                                        const videoResponse = await youtube.videos.list({
+                                            part: 'contentDetails,snippet',
+                                            id: videoId
                                         });
 
-                                        if (!dailyStats[date]) {
-                                            dailyStats[date] = { totalMinutes: 0, videoCount: 0 };
+                                        if (videoResponse.data.items && videoResponse.data.items.length > 0) {
+                                            const video = videoResponse.data.items[0];
+                                            const duration = parseDuration(video.contentDetails.duration);
+                                            const watchedAt = new Date(item.snippet.publishedAt);
+                                            const date = watchedAt.toISOString().split('T')[0];
+                                            
+                                            watchData.push({
+                                                title: video.snippet.title,
+                                                watchedAt: item.snippet.publishedAt,
+                                                duration: duration,
+                                                videoId: videoId,
+                                                channelTitle: video.snippet.channelTitle,
+                                                isHistory: true
+                                            });
+
+                                            if (!dailyStats[date]) {
+                                                dailyStats[date] = { totalMinutes: 0, videoCount: 0 };
+                                            }
+                                            dailyStats[date].totalMinutes += duration;
+                                            dailyStats[date].videoCount += 1;
                                         }
-                                        dailyStats[date].totalMinutes += duration;
-                                        dailyStats[date].videoCount += 1;
+                                    } catch (videoError) {
+                                        console.error('Ошибка при получении видео из истории:', videoError);
                                     }
                                 }
                             }
+                        } catch (historyError) {
+                            console.log('Не удалось получить историю просмотров:', historyError.message);
                         }
-                    } catch (playlistError) {
-                        console.log('История просмотров недоступна через API');
                     }
+                    
+                    // Метод 2: Попытка через My Activity API (требует дополнительных разрешений)
+                    try {
+                        // Этот метод пока недоступен через стандартный YouTube API
+                        console.log('My Activity API пока не реализован');
+                    } catch (activityError) {
+                        console.log('My Activity API недоступен:', activityError.message);
+                    }
+                    
+                } catch (historyError) {
+                    console.log('Не удалось получить историю просмотров:', historyError.message);
                 }
             }
+
+        } catch (apiError) {
+            console.error('Ошибка при работе с YouTube API:', apiError);
         }
 
-        // Если все еще нет данных, создаем демо данные
-        if (watchData.length === 0) {
-            const demoData = generateDemoWatchHistory();
-            res.json(demoData);
+        // Если получили хотя бы немного реальных данных, дополним их демо данными
+        if (watchData.length > 0) {
+            console.log(`Получили ${watchData.length} реальных видео, дополняем демо данными`);
+            
+            // Генерируем дополнительные демо данные для заполнения пробелов
+            const additionalDemoData = generateDemoWatchHistory();
+            
+            // Смешиваем реальные и демо данные
+            const mixedData = [...watchData];
+            
+            // Добавляем часть демо данных, помечая их
+            additionalDemoData.watchHistory.slice(0, Math.max(0, 50 - watchData.length)).forEach(demoVideo => {
+                mixedData.push({
+                    ...demoVideo,
+                    isDemo: true
+                });
+            });
+
+            // Пересчитываем статистику
+            const mixedStats = { ...dailyStats };
+            Object.keys(additionalDemoData.dailyStats).forEach(date => {
+                if (!mixedStats[date]) {
+                    mixedStats[date] = additionalDemoData.dailyStats[date];
+                } else {
+                    mixedStats[date].totalMinutes += additionalDemoData.dailyStats[date].totalMinutes;
+                    mixedStats[date].videoCount += additionalDemoData.dailyStats[date].videoCount;
+                }
+            });
+
+            res.json({
+                watchHistory: mixedData,
+                dailyStats: mixedStats,
+                isMixed: true,
+                realDataCount: watchData.length,
+                message: 'Смешанные данные: часть реальных, часть демо (YouTube API ограничивает доступ к истории просмотров)'
+            });
         } else {
-            res.json({ watchHistory: watchData, dailyStats });
+            console.log('Реальных данных не получено, отправляем демо данные с объяснением');
+            const demoData = generateDemoWatchHistory();
+            res.json({
+                ...demoData,
+                isDemo: true,
+                message: 'Демо данные - YouTube API не предоставляет доступ к истории просмотров по соображениям конфиденциальности. Для получения реальных данных экспортируйте их через Google Takeout.'
+            });
         }
 
     } catch (error) {
         console.error('Ошибка при получении истории просмотра:', error);
         
-        // В случае ошибки отправляем демо данные
         const demoData = generateDemoWatchHistory();
-        res.json(demoData);
+        res.json({
+            ...demoData,
+            isDemo: true,
+            error: error.message,
+            message: 'Демо данные из-за ошибки API'
+        });
     }
 });
 
