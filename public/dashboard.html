@@ -183,26 +183,26 @@
         </div>
         
         <div class="controls">
-            <button id="loadData" class="load-btn">Загрузить данные просмотров</button>
+            <button id="loadData" class="load-btn">Загрузить историю просмотров</button>
         </div>
         
         <div id="error-container"></div>
         
         <div class="content">
             <div class="table-section">
-                <h2>Статистика по дням</h2>
+                <h2>История просмотренных видео</h2>
                 <div id="loading-table" class="loading" style="display: none;">
                     <div class="spinner"></div>
                     <p>Загружаем данные...</p>
                 </div>
                 <div id="table-container">
-                    <p>Нажмите "Загрузить данные" для получения статистики</p>
+                    <p>Нажмите "Загрузить историю просмотров" для получения данных</p>
                 </div>
                 <button id="exportTable" class="export-btn" style="display: none;">Экспорт в Excel</button>
             </div>
             
             <div class="chart-section">
-                <h2>График просмотров</h2>
+                <h2>Активность просмотра по дням</h2>
                 <div id="loading-chart" class="loading" style="display: none;">
                     <div class="spinner"></div>
                     <p>Загружаем график...</p>
@@ -235,9 +235,9 @@
                     throw new Error(data.error || 'Ошибка загрузки данных');
                 }
                 
-                tableData = data.tableData;
-                displayTable(data.tableData);
-                displayChart(data.chartData);
+                tableData = data.watchHistory || data;
+                displayTable(data.watchHistory || data);
+                displayChart(data);
                 
             } catch (error) {
                 document.getElementById('error-container').innerHTML = 
@@ -254,40 +254,80 @@
         function displayTable(data) {
             const container = document.getElementById('table-container');
             
-            if (data.length === 0) {
+            if (!data || data.length === 0) {
                 container.innerHTML = '<p>Данные не найдены</p>';
                 return;
             }
             
+            // Сортируем по дате просмотра (новые сначала)
+            const sortedData = [...data].sort((a, b) => new Date(b.watchedAt) - new Date(a.watchedAt));
+            
+            let totalMinutes = 0;
             let tableHTML = `
                 <table>
                     <thead>
                         <tr>
-                            <th>День</th>
-                            <th>Дата</th>
-                            <th>Минуты просмотра</th>
+                            <th>Название видео</th>
+                            <th>Канал</th>
+                            <th>Дата просмотра</th>
+                            <th>Длительность (мин)</th>
                         </tr>
                     </thead>
                     <tbody>
             `;
             
-            data.forEach(row => {
+            sortedData.forEach(video => {
+                totalMinutes += video.duration;
                 tableHTML += `
                     <tr>
-                        <td>${row.day}</td>
-                        <td>${row.date}</td>
-                        <td>${row.minutes}</td>
+                        <td>${video.title}</td>
+                        <td>${video.channelTitle || 'Неизвестно'}</td>
+                        <td>${new Date(video.watchedAt).toLocaleString('ru-RU')}</td>
+                        <td>${video.duration}</td>
                     </tr>
                 `;
             });
             
             tableHTML += '</tbody></table>';
+            tableHTML += `<div style="margin-top: 15px; padding: 10px; background: #f8f9fa; border-radius: 5px;">`;
+            tableHTML += `<strong>Статистика:</strong> ${sortedData.length} видео, ${totalMinutes} минут общего времени просмотра`;
+            tableHTML += `</div>`;
+            
             container.innerHTML = tableHTML;
             
             document.getElementById('exportTable').style.display = 'inline-block';
         }
 
-        function displayChart(chartData) {
+        function displayChart(data) {
+            const dailyStats = data.dailyStats || {};
+            const watchHistory = data.watchHistory || data;
+            
+            // Если нет dailyStats, создаем из watchHistory
+            let chartData = dailyStats;
+            if (Object.keys(dailyStats).length === 0) {
+                chartData = {};
+                watchHistory.forEach(video => {
+                    const date = new Date(video.watchedAt).toISOString().split('T')[0];
+                    if (!chartData[date]) {
+                        chartData[date] = { totalMinutes: 0, videoCount: 0 };
+                    }
+                    chartData[date].totalMinutes += video.duration;
+                    chartData[date].videoCount += 1;
+                });
+            }
+
+            // Создаем полный набор дат за последние 30 дней
+            const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+            const labels = [];
+            const watchMinutes = [];
+            
+            for (let i = 0; i < 30; i++) {
+                const date = new Date(thirtyDaysAgo.getTime() + i * 24 * 60 * 60 * 1000);
+                const dateStr = date.toISOString().split('T')[0];
+                labels.push(date.toLocaleDateString('ru-RU'));
+                watchMinutes.push(chartData[dateStr] ? chartData[dateStr].totalMinutes : 0);
+            }
+            
             const ctx = document.getElementById('watchChart').getContext('2d');
             
             if (chart) {
@@ -296,27 +336,37 @@
             
             chart = new Chart(ctx, {
                 type: 'line',
-                data: chartData,
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Минуты просмотра',
+                        data: watchMinutes,
+                        borderColor: 'rgb(255, 99, 132)',
+                        backgroundColor: 'rgba(255, 99, 132, 0.2)',
+                        fill: true,
+                        tension: 0.1
+                    }]
+                },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
                     plugins: {
                         title: {
                             display: true,
-                            text: 'Минуты просмотра YouTube за последние 30 дней'
+                            text: 'Время просмотра YouTube по дням (последние 30 дней)'
                         }
                     },
                     scales: {
                         x: {
                             title: {
                                 display: true,
-                                text: 'День'
+                                text: 'Дата'
                             }
                         },
                         y: {
                             title: {
                                 display: true,
-                                text: 'Минуты'
+                                text: 'Минуты просмотра'
                             },
                             beginAtZero: true
                         }
@@ -326,18 +376,18 @@
         }
 
         document.getElementById('exportTable').addEventListener('click', function() {
-            if (tableData.length === 0) return;
+            if (!tableData || tableData.length === 0) return;
             
-            let csvContent = "День\tДата\tМинуты просмотра\n";
-            tableData.forEach(row => {
-                csvContent += `${row.day}\t${row.date}\t${row.minutes}\n`;
+            let csvContent = "Название видео\tКанал\tДата просмотра\tДлительность (мин)\n";
+            tableData.forEach(video => {
+                csvContent += `${video.title}\t${video.channelTitle || 'Неизвестно'}\t${new Date(video.watchedAt).toLocaleString('ru-RU')}\t${video.duration}\n`;
             });
             
             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement('a');
             const url = URL.createObjectURL(blob);
             link.setAttribute('href', url);
-            link.setAttribute('download', 'youtube_watch_time.csv');
+            link.setAttribute('download', 'youtube_watch_history.csv');
             link.style.visibility = 'hidden';
             document.body.appendChild(link);
             link.click();
